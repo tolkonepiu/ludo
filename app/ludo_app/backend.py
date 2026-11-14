@@ -74,6 +74,7 @@ try:
         flatpak_app_installed,
         STANDALONE_EMULATORS, find_standalone_builds,
         _extract_archive, _archive_member_names, WIIU_SLUGS, resolve_wiiu_rom,
+        XBOX360_SLUGS, resolve_xbox360_rom,
         get_desktop_tile_status, add_desktop_tile, remove_desktop_tile,
         drain_notifications as _drain_notifications,
         push_notification as _push_notification,
@@ -429,7 +430,7 @@ def _resolve_download_path(download_dir, platform_slug, file_name):
     return Path(download_dir) / folders[0] / file_name, False
 
 
-def _detect_multi_disc(local_path, is_downloaded):
+def _detect_multi_disc(local_path, is_downloaded, platform_slug=None):
     """Return (is_multi_disc, disc_count) for the downloaded game.
 
     Covers both flavours of "multiple bootable files in one folder":
@@ -439,6 +440,8 @@ def _detect_multi_disc(local_path, is_downloaded):
     resolved later from the on-disk entries (see get_local_discs).
     """
     if not is_downloaded:
+        return False, 0
+    if str(platform_slug or '').lower() in XBOX360_SLUGS:
         return False, 0
     p = Path(local_path)
     if not p.exists():
@@ -1654,7 +1657,7 @@ class LudoBackend:
                                          for f in local_path.rglob('*') if f.is_file())
                     else:
                         local_size = local_path.stat().st_size
-                is_md, dc = _detect_multi_disc(local_path, is_downloaded)
+                is_md, dc = _detect_multi_disc(local_path, is_downloaded, platform_slug)
                 g['is_downloaded'] = is_downloaded
                 g['local_path'] = str(local_path) if is_downloaded else None
                 g['local_size'] = local_size
@@ -6744,7 +6747,7 @@ class LudoBackend:
                                  for f in local_path.rglob('*') if f.is_file())
             else:
                 local_size = local_path.stat().st_size
-        is_md = _detect_multi_disc(local_path, is_downloaded)
+        is_md = _detect_multi_disc(local_path, is_downloaded, platform_slug)
         # Region/language flags for the tile (RomM Card Flags.vue). Only kept
         # when non-empty: most rows have neither, and an always-present pair of
         # empty lists is dead weight on every entry in a 50k snapshot.
@@ -7223,7 +7226,7 @@ class LudoBackend:
         path = v.get('local_path')
         if not path or not is_path_validly_downloaded(Path(path)):
             return None
-        is_md, dc = _detect_multi_disc(path, True)
+        is_md, dc = _detect_multi_disc(path, True, self._platform_slug_for(parent))
         return dict(parent, rom_id=variant_id,
                     name=v.get('name') or parent.get('name'),
                     file_name=v.get('file_name') or parent.get('file_name'),
@@ -7363,6 +7366,11 @@ class LudoBackend:
         Returns None when nothing launchable is present.
         """
         p = Path(local_path)
+        slug = str(platform_slug or '').lower()
+        # Xbox 360 folder titles are executable trees, not disc sets.
+        if slug in XBOX360_SLUGS:
+            target, _root = resolve_xbox360_rom(p)
+            return str(target) if target.is_file() else None
         if p.is_file():
             return str(p)
         # A Wii U title is not a disc set, and the disc lister below would read
@@ -7420,8 +7428,8 @@ class LudoBackend:
             g = self._games_index().get(rom_id)
             if not g or not g.get('is_downloaded') or not g.get('local_path'):
                 return {'success': True, 'discs': [], 'last': ''}
-            if str(g.get('platform_slug') or '').lower() in WIIU_SLUGS:
-                # One launch file per Wii U title; there is nothing to pick.
+            if self._platform_slug_for(g).lower() in WIIU_SLUGS + XBOX360_SLUGS:
+                # One launch target per title; there is nothing to pick.
                 return {'success': True, 'discs': [], 'last': ''}
             discs = self._list_local_discs(g['local_path'])
             last = self._get_last_disc(rom_id)
@@ -7700,7 +7708,7 @@ class LudoBackend:
                         fs = r.get('fs_name')
                         slug = r.get('platform_slug')
                         if fs and slug:
-                            is_downloaded = is_path_validly_downloaded(download_dir / slug / fs)
+                            _, is_downloaded = _resolve_download_path(download_dir, slug, fs)
                     entry = {
                         'rom_id': rid,
                         'name': r.get('name') or (local or {}).get('display_name') or (local or {}).get('name') or r.get('fs_name_no_ext') or 'Unknown',
@@ -7716,7 +7724,7 @@ class LudoBackend:
                         if fv:
                             entry[fk] = fv[:3]
                     if local and local.get('is_downloaded') and local.get('local_path'):
-                        is_md, dc = _detect_multi_disc(local['local_path'], True)
+                        is_md, dc = _detect_multi_disc(local['local_path'], True, self._platform_slug_for(local))
                         entry['is_multi_disc'] = is_md
                         entry['disc_count'] = dc
                     sibs = r.get('sibling_roms') or (local or {}).get('sibling_roms') or []
@@ -7840,7 +7848,7 @@ class LudoBackend:
                         if fv:
                             entry[fk] = fv[:3]
                     if local and local.get('is_downloaded') and local.get('local_path'):
-                        is_md, dc = _detect_multi_disc(local['local_path'], True)
+                        is_md, dc = _detect_multi_disc(local['local_path'], True, self._platform_slug_for(local))
                         entry['is_multi_disc'] = is_md
                         entry['disc_count'] = dc
                     sibs = r.get('sibling_roms') or (local or {}).get('sibling_roms') or []
@@ -9880,7 +9888,7 @@ class LudoBackend:
                     if ok and live:
                         live['is_downloaded'] = True
                         live['local_path'] = str(final)
-                        is_md, dc = _detect_multi_disc(str(final), True)
+                        is_md, dc = _detect_multi_disc(str(final), True, platform_slug)
                         live['is_multi_disc'] = is_md
                         live['disc_count'] = dc
                     elif ok and parent is not None:
@@ -9898,7 +9906,7 @@ class LudoBackend:
                         # Genuinely not in the library and not a known variant —
                         # add it so launch_game can find it. Safe under CPython's
                         # GIL (same assumption as the mutations above).
-                        is_md, dc = _detect_multi_disc(str(final), True)
+                        is_md, dc = _detect_multi_disc(str(final), True, platform_slug)
                         self._available_games.append({
                             'name': name or 'Unknown',
                             'rom_id': rom_id,
@@ -10475,9 +10483,9 @@ class LudoBackend:
                         d = r.json()
                         slug = d.get('platform_slug', 'Unknown')
                         fn = d.get('fs_name') or f"{d.get('name', 'rom')}.rom"
-                        candidate = download_dir / slug / fn
-                        if is_path_validly_downloaded(candidate):
-                            is_md, dc = _detect_multi_disc(str(candidate), True)
+                        candidate, downloaded = _resolve_download_path(download_dir, slug, fn)
+                        if downloaded:
+                            is_md, dc = _detect_multi_disc(str(candidate), True, slug)
                             found = {
                                 'rom_id': effective_rom_id,
                                 'name': d.get('name') or 'Unknown',
@@ -10527,11 +10535,11 @@ class LudoBackend:
                 return {'success': False, 'message': 'RetroArch not available'}
             # A bare Play resumes the remembered disc; an explicit pick overrides.
             effective_disc = disc or self._get_last_disc(effective_rom_id) or None
-            launch_path = self._resolve_launch_path(g['local_path'], effective_disc, g.get('platform_slug'))
+            launch_path = self._resolve_launch_path(g['local_path'], effective_disc, self._platform_slug_for(g))
             if not launch_path and effective_disc:
                 # Remembered disc vanished — fall back to the default resolution.
                 effective_disc = None
-                launch_path = self._resolve_launch_path(g['local_path'], None, g.get('platform_slug'))
+                launch_path = self._resolve_launch_path(g['local_path'], None, self._platform_slug_for(g))
             if not launch_path:
                 return {'success': False, 'message': 'No launchable file found'}
             launch_path, why = await self._ready_to_boot(g, launch_path)
@@ -11474,10 +11482,10 @@ class LudoBackend:
                 return {'success': False, 'steam_host': False,
                         'message': 'Game not downloaded'}
             effective_disc = disc or self._get_last_disc(effective_rom_id) or None
-            launch_path = self._resolve_launch_path(g['local_path'], effective_disc, g.get('platform_slug'))
+            launch_path = self._resolve_launch_path(g['local_path'], effective_disc, self._platform_slug_for(g))
             if not launch_path and effective_disc:
                 effective_disc = None
-                launch_path = self._resolve_launch_path(g['local_path'], None, g.get('platform_slug'))
+                launch_path = self._resolve_launch_path(g['local_path'], None, self._platform_slug_for(g))
             if not launch_path:
                 return {'success': False, 'steam_host': False,
                         'message': 'No launchable file found'}

@@ -148,7 +148,7 @@ describe("rendering with a populated library", { skip: SKIP }, () => {
       await r.activateText("Settings");
       await r.activateText("Emulators");
       const p = await r.probe();
-      for (const says of ["RetroDECK", "243 cores", "Eden", "Cemu", "detected automatically"]) {
+      for (const says of ["RetroDECK", "243 cores", "Eden", "Cemu", "Xenia", "detected automatically"]) {
         assert.ok(p.text.includes(says), `emulators page: expected ${says} in ${p.text.slice(0, 300)}`);
       }
       // Slow the activity list, as a real backend is: Settings then rebuilds
@@ -187,6 +187,34 @@ describe("rendering with a populated library", { skip: SKIP }, () => {
         `the Emulators row moved while the page came back: ${JSON.stringify([...new Set(ys)])}`);
       assert.ok(seen.every((t) => t.startsWith("Emulators")),
         `focus visited other rows on the way back: ${JSON.stringify(seen)}`);
+      assert.deepEqual(r.errors, []);
+    } finally {
+      await r.close();
+    }
+  });
+
+  test("Xenia offers Canary and Edge and persists the selected build", async () => {
+    const r = await openRoute(browser, srv.origin, "/romm-sync-emulators");
+    const edge = "/home/t/AppImages/xenia_edge_linux.AppImage";
+    try {
+      await r.activateText("Xenia");
+      let p = await r.probe();
+      for (const says of ["Xenia Canary", "Xenia Edge", "xenia_canary_linux.AppImage", "xenia_edge_linux.AppImage",
+        "Save and settings locations depend on the build."]) {
+        assert.ok(p.text.includes(says), `Xenia picker: expected ${says}`);
+      }
+      const requestStart = srv.requests.length;
+      await r.activateText("Xenia Edge");
+      assert.deepEqual(srv.requests.slice(requestStart).filter((r) => r.method === "set_emulator_build"), [
+        { method: "set_emulator_build", args: ["xenia", edge] },
+      ]);
+      p = await r.probe();
+      assert.ok(p.text.includes(`${edge} · chosen by you`), p.text);
+      // Reload to prove this came from the fixture backend, not just optimistic UI state.
+      await r.page.reload({ waitUntil: "networkidle" });
+      await r.page.getByText(edge, { exact: false }).waitFor();
+      p = await r.probe();
+      assert.ok(p.text.includes(`${edge} · chosen by you`), p.text);
       assert.deepEqual(r.errors, []);
     } finally {
       await r.close();

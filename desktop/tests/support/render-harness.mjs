@@ -47,20 +47,33 @@ export function distIsBuilt() {
  * POST /api/<method> returns `{result}`, and every unknown GET falls back to
  * index.html so a client-side route survives a direct navigation.
  *
- * Returns `{ origin, calls, close }`; `calls` accumulates every method the
+ * Returns `{ origin, calls, requests, close }`; `calls` accumulates every method the
  * page asked for, which is what lets a test assert a page actually talked to
  * the backend rather than rendering an empty husk.
  */
 export async function startServer({ fixtures = null } = {}) {
   const calls = [];
+  const requests = [];
+  const selections = {};
   const srv = createServer(async (req, res) => {
     const path = (req.url ?? "/").split("?")[0];
 
     if (req.method === "POST") {
       let method = path.startsWith("/api/") ? decodeURIComponent(path.slice(5)) : "";
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let args;
+      try {
+        ({ args = [] } = body ? JSON.parse(body) : {});
+        if (!Array.isArray(args)) throw new Error("args must be an array");
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
       calls.push(method);
+      requests.push({ method, args });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ result: fixtureFor(method, fixtures) }));
+      res.end(JSON.stringify({ result: fixtureFor(method, fixtures, args, selections) }));
       return;
     }
 
@@ -91,6 +104,7 @@ export async function startServer({ fixtures = null } = {}) {
   return {
     origin: `http://127.0.0.1:${port}`,
     calls,
+    requests,
     close: () => new Promise((ok) => srv.close(ok)),
   };
 }

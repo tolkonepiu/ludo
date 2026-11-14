@@ -1254,7 +1254,16 @@ def _is_own_appimage(name):
 # "Nintendo - Switch" all land on the same entry.
 # `args` is the argv after the executable; '{rom}' is replaced with the ROM path.
 # ---------------------------------------------------------------------------
+XBOX360_SLUGS = ('xbox360',)
+
 STANDALONE_EMULATORS = {
+    'xenia': {
+        'name': 'Xenia',
+        'platforms': XBOX360_SLUGS,
+        'binaries': ('xenia_canary', 'xenia_edge', 'xenia-canary', 'xenia-edge'),
+        'args': ('{rom}',),
+        'resolve_rom': 'xbox360',
+    },
     'eden': {
         'name': 'Eden',
         'platforms': ('nintendo switch', 'switch'),
@@ -1348,6 +1357,20 @@ def resolve_wiiu_rom(rom_path):
     return path, path.parent
 
 
+def resolve_xbox360_rom(rom_path):
+    """Boot an Xbox 360 image/executable, keeping a folder game's siblings."""
+    path = Path(rom_path)
+    if path.is_dir():
+        target = next((f for f in sorted(path.iterdir())
+                       if f.is_file() and f.name.lower() == 'default.xex'), None)
+        if target:
+            return target, path
+        raise ValueError('Xenia needs a folder containing default.xex or a .iso/.xex file')
+    if path.suffix.lower() in ('.iso', '.xex'):
+        return path, path.parent
+    raise ValueError('Xenia supports .iso/.xex files or a folder containing default.xex')
+
+
 def _standalone_appimage_dirs():
     """Directories to scan for a standalone emulator's AppImage, best first.
 
@@ -1370,6 +1393,10 @@ def _standalone_build_label(spec, stem):
     """Human name for one discovered build: "Eden" or "Eden nightly"."""
     name = spec.get('name') or stem
     parts = re.split(r'[-_. ]+', stem.lower())
+    if name == 'Xenia':
+        for variant in ('canary', 'edge'):
+            if variant in parts:
+                return f'Xenia {variant.title()}'
     for marker in _STANDALONE_DEV_MARKERS:
         if marker in parts:
             return f"{name} {marker}"
@@ -1427,7 +1454,7 @@ def find_standalone_builds(key, spec, settings=None):
     for name in spec.get('binaries', ()):
         found = shutil.which(name)
         if found:
-            add(found, f"{spec.get('name') or key} ({name} on PATH)", 'path')
+            add(found, f"{_standalone_build_label(spec, name)} ({name} on PATH)", 'path')
 
     # Mark what an unconfigured Ludo would pick, so the UI can label the
     # automatic choice with the build it actually resolves to rather than
@@ -1652,10 +1679,16 @@ def standalone_emulator_for_platform(platform_name, platform_slug=None):
     and the two are worth keeping apart: "Switch is not a core platform" stays
     true whether or not Eden is on disk.
     """
-    haystack = ' '.join(str(x or '').lower() for x in (platform_name, platform_slug))
+    values = [str(x or '').strip().lower() for x in (platform_name, platform_slug)]
+    haystack = ' '.join(values)
     if not haystack.strip():
         return None
     for key, spec in STANDALONE_EMULATORS.items():
+        if key == 'xenia':
+            slug = platform_slug if platform_slug is not None else platform_name
+            if str(slug or '').strip().lower() in XBOX360_SLUGS:
+                return key, spec
+            continue
         for token in spec['platforms']:
             if token in haystack:
                 return key, spec
@@ -2516,6 +2549,57 @@ def _extract_wiiu_archive(archive_path, on_progress=None):
                 pass
     archive_path.unlink()
     return True, ''
+
+
+def _extract_xbox360_archive(archive_path, on_progress=None, dest=None):
+    """Stage a folder title intact; keep the archive until a bootable tree is installed."""
+    import tempfile
+    archive_path = Path(archive_path)
+    dest = Path(dest) if dest is not None else archive_path.with_suffix('')
+    try:
+        members = _archive_member_names(archive_path)
+        if not members or any(Path(n.replace('\\', '/')).is_absolute() or
+                              '..' in Path(n.replace('\\', '/')).parts or
+                              re.match(r'^[A-Za-z]:', n) for n in members):
+            raise ValueError('invalid or unsafe archive paths')
+        if archive_path.suffix.lower() == '.zip':
+            with _zipfile.ZipFile(archive_path) as zf:
+                if any(stat.S_ISLNK(m.external_attr >> 16) for m in zf.infolist()):
+                    raise ValueError('archive contains symbolic links')
+        else:
+            import subprocess
+            exe = _find_7z()
+            if not exe:
+                raise ValueError('7z is required to safely inspect this folder archive')
+            listing = subprocess.run([exe, 'l', '-slt', str(archive_path)],
+                                     capture_output=True, text=True, check=True).stdout
+            if re.search(r'^(Symbolic Link|Hard Link) =|^Attributes = .*\bl[rwx-]{9}',
+                         listing, re.MULTILINE):
+                raise ValueError('archive contains links')
+        with tempfile.TemporaryDirectory(prefix='.ludo-extract-', dir=dest.parent) as tmp:
+            stage = Path(tmp) / 'game'
+            if not _extract_archive(archive_path, stage, on_progress):
+                raise ValueError('archive extraction failed (a .7z needs 7z or py7zr)')
+            # RomM and user archives may wrap the game in its own directory.
+            root = stage
+            while True:
+                try:
+                    resolve_xbox360_rom(root)
+                    break
+                except ValueError:
+                    children = list(root.iterdir())
+                    if len(children) != 1 or not children[0].is_dir():
+                        raise
+                    root = children[0]
+            if dest.exists():
+                if not dest.is_dir() or any(dest.iterdir()):
+                    raise ValueError(f'destination already exists: {dest}')
+                dest.rmdir()
+            root.replace(dest)
+        archive_path.unlink()
+        return True, ''
+    except Exception as e:
+        return False, f'Could not unpack {archive_path.name}: {e}; archive kept at {archive_path}'
 
 
 def _sevenzip_total_size(exe, archive_path):
@@ -5318,22 +5402,22 @@ class RomMClient:
                         os.unlink(temp_path)
                     raise DownloadCancelledException(f"Download cancelled: {rom_name}")
                 
-                # Extract from temporary file
-                try:
-                    with zipfile.ZipFile(temp_path, 'r') as zip_ref:
-                        # Extract everything, INCLUDING the .m3u playlist. RomM's
-                        # download endpoint generates a "<fs_name>.m3u" inside the zip
-                        # for multi-disc/multi-file ROMs (listing the disc .chd/.cue
-                        # files). RetroArch needs that playlist to boot multi-disc
-                        # games and to swap discs — without it, the game lands on the
-                        # console BIOS. (Previously these were stripped on the false
-                        # assumption that RomM doesn't provide them.)
-                        for member in zip_ref.namelist():
-                            zip_ref.extract(member, download_path)
-                finally:
-                    # Clean up temporary file
-                    if temp_path and os.path.exists(temp_path):
-                        os.unlink(temp_path)
+                # Standalone folder titles must keep their complete game tree.
+                slug = str(rom_details.get('platform_slug') or '').lower()
+                if slug in XBOX360_SLUGS:
+                    unpacked, why = _extract_xbox360_archive(temp_path, dest=download_path)
+                    if not unpacked:
+                        return False, why
+                else:
+                    try:
+                        with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                            # Keep RomM's .m3u playlist for RetroArch disc swapping.
+                            for member in zip_ref.namelist():
+                                zip_ref.extract(member, download_path)
+                    finally:
+                        # Clean up temporary file
+                        if temp_path and os.path.exists(temp_path):
+                            os.unlink(temp_path)
             else:
                 # Written to a .part and renamed, never straight to the
                 # final name. A dropped connection used to leave 4.4 GB of a
@@ -5400,7 +5484,16 @@ class RomMClient:
                                 and actual_downloaded > 0
                                 and str(rom_details.get('platform_slug') or '').lower()
                                 in WIIU_SLUGS)
-                if wiiu_archive:
+                slug = str(rom_details.get('platform_slug') or '').lower()
+                if (download_path.suffix.lower() in ('.zip', '.7z')
+                        and actual_downloaded > 0 and slug in XBOX360_SLUGS):
+                    def _unpack_pct(pct):
+                        if progress_callback:
+                            progress_callback({'extracting': pct})
+                    unpacked, why = _extract_xbox360_archive(download_path, _unpack_pct)
+                    if not unpacked:
+                        return False, why
+                elif wiiu_archive:
                     def _unpack_pct(pct):
                         if progress_callback:
                             progress_callback({'extracting': pct})
@@ -8882,6 +8975,8 @@ class RetroArchInterface:
         grant_root = Path(rom_path).parent
         if spec.get('resolve_rom') == 'wiiu':
             rom_path, grant_root = resolve_wiiu_rom(rom_path)
+        elif spec.get('resolve_rom') == 'xbox360':
+            rom_path, grant_root = resolve_xbox360_rom(rom_path)
         args = [a.replace('{rom}', str(rom_path)) for a in spec['args']]
         if spec.get('prelaunch') == 'cemu_audio':
             fix_cemu_audio_device(executable)
@@ -8916,9 +9011,12 @@ class RetroArchInterface:
                 return None, (f"{standalone['name']} is not installed — "
                               f"{platform_name} needs it, no core can run it")
             key = standalone['key']
-            return self.build_standalone_launch_command(
-                rom_path, key, STANDALONE_EMULATORS[key],
-                standalone['executable']), None
+            try:
+                return self.build_standalone_launch_command(
+                    rom_path, key, STANDALONE_EMULATORS[key],
+                    standalone['executable']), None
+            except (ValueError, OSError) as e:
+                return None, str(e)
 
         if not self.retroarch_executable:
             return None, "RetroArch executable not found"
@@ -19488,13 +19586,22 @@ class SteamShortcutManager:
             return None
         return userdata / 'shortcuts.vdf'
 
-    def _build_launch_command(self, rom_path, platform_name):
+    def _build_launch_command(self, rom_path, platform_name, platform_slug=None):
         """Build the exe and launch options for a ROM.
 
         Returns (exe, launch_options) tuple, or (None, None) if no core found.
         """
         if not self.retroarch:
             return None, None
+
+        if standalone_emulator_for_platform(platform_name, platform_slug):
+            import shlex
+            cmd, error = self.retroarch.build_launch_command(
+                rom_path, platform_name, platform_slug=platform_slug)
+            if error:
+                self.log(f'  {error}')
+                return None, None
+            return f'"{cmd[0]}"', shlex.join(cmd[1:])
 
         # RetroDECK: keyed on the SELECTED executable, with
         # is_retrodeck_installation() only as the fallback for when nothing was
@@ -19545,13 +19652,17 @@ class SteamShortcutManager:
             platform_slug: Optional platform slug for cover art organization
             cover_url: Optional cover URL from RomM API (path_cover_l or path_cover_s)
         """
-        exe, launch_options = self._build_launch_command(rom_path, platform_name)
+        exe, launch_options = self._build_launch_command(rom_path, platform_name, platform_slug)
 
         # If no core found, create placeholder shortcut
         if not exe:
+            standalone = standalone_emulator_for_platform(platform_name, platform_slug)
             # Two different failures reach here, and telling the user to install a
             # core when the whole emulator is missing sends them the wrong way.
-            if not self.retroarch.retroarch_executable:
+            if standalone:
+                _, why = self.retroarch.build_launch_command(
+                    rom_path, platform_name, platform_slug=platform_slug)
+            elif not self.retroarch.retroarch_executable:
                 why = ('No emulator installed. Install RetroArch or RetroDECK, '
                        'then re-sync this collection.')
             else:

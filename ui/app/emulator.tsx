@@ -52,7 +52,7 @@ export type EmuStatus = {
 
 export type EmuStandalone = {
   key: string; name: string; installed: boolean; executable: string;
-  // Lowercase tokens matched against a game's platform name and slug.
+  // Lowercase platform tokens; Xenia uses only RomM's canonical slug.
   platforms: string[];
 };
 
@@ -224,14 +224,16 @@ export function installSize(s: EmuInstall): string {
 
 // The standalone emulator that owns a game's platform, installed or not — Eden
 // for a Switch ROM. Matched on the same tokens the backend uses, against both
-// the platform name and its slug, so "Nintendo Switch" and "switch" both hit.
+// the platform name and its slug, except Xenia uses only the canonical slug.
 export function standaloneFor(status: EmuStatus | null,
                        platform?: string | null,
                        slug?: string | null): EmuStandalone | null {
   if (!status?.standalone?.length) return null;
   const hay = `${platform || ''} ${slug || ''}`.toLowerCase();
   if (!hay.trim()) return null;
-  return status.standalone.find((s) => s.platforms.some((p) => hay.includes(p))) || null;
+  return status.standalone.find((s) => s.key === 'xenia'
+    ? (slug ?? platform ?? '').trim().toLowerCase() === 'xbox360'
+    : s.platforms.some((p) => hay.includes(p))) || null;
 }
 
 // ─── Per-platform sync ───────────────────────────────────────────────────────

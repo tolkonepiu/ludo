@@ -125,14 +125,28 @@ const GAME = {
   has_cover: false,
 };
 
+const EMULATOR_BUILDS = {
+  eden: { name: "Eden", builds: [
+    { path: "/home/t/AppImages/eden.AppImage", label: "Eden", kind: "appimage", current: true },
+  ] },
+  cemu: { name: "Cemu", builds: [
+    { path: "flatpak:info.cemu.Cemu", label: "Cemu (Flatpak)", kind: "flatpak", current: true },
+  ] },
+  xenia: { name: "Xenia", builds: [
+    { path: "/home/t/AppImages/xenia_canary_linux.AppImage", label: "Xenia Canary", kind: "appimage", current: true },
+    { path: "/home/t/AppImages/xenia_edge_linux.AppImage", label: "Xenia Edge", kind: "appimage", current: false },
+  ] },
+};
+
 export const POPULATED_FIXTURES = {
-  // Two standalone emulators beside RetroDECK, so the Emulators page has rows.
+  // Standalone emulators beside RetroDECK, so the Emulators page has rows.
   get_emulator_status: {
     success: true, installed: true, kind: "retrodeck",
     executable: "flatpak run net.retrodeck.retrodeck", core_count: 243,
     standalone: [
       { key: "eden", name: "Eden", installed: true, executable: "/home/t/AppImages/eden.AppImage", platforms: ["switch"] },
       { key: "cemu", name: "Cemu", installed: true, executable: "flatpak:info.cemu.Cemu", platforms: ["wii u"] },
+      { key: "xenia", name: "Xenia", installed: true, executable: "/home/t/AppImages/xenia_canary_linux.AppImage", platforms: ["xbox360"] },
     ],
     stale_paths: [], save_dirs: {}, bios_dir: "/home/t/bios",
     configured_paths: {}, default_paths: {}, expected_paths: {},
@@ -146,9 +160,16 @@ export const POPULATED_FIXTURES = {
       timestamp: 1792449790 + i * 1000,
     })),
   },
-  list_emulator_builds: {
-    success: true, name: "Eden", selected: "",
-    builds: [{ path: "/home/t/AppImages/eden.AppImage", label: "Eden", kind: "appimage", current: true }],
+  list_emulator_builds: ([key = "eden"], selections) => {
+    const emulator = Object.hasOwn(EMULATOR_BUILDS, key) ? EMULATOR_BUILDS[key] : null;
+    return emulator
+      ? { success: true, key, ...emulator, selected: selections[key] || "" }
+      : { success: false, builds: [], selected: "" };
+  },
+  set_emulator_build: ([key, path], selections) => {
+    if (!Object.hasOwn(EMULATOR_BUILDS, key)) return { success: false, message: "Unknown emulator" };
+    selections[key] = path || "";
+    return { success: true };
   },
   get_core_mappings: {
     success: true,
@@ -219,10 +240,13 @@ export const POPULATED_FIXTURES = {
  * `extra` is the populated profile when a test asked for one; unlisted methods
  * fall through to the empty table and then to `null`, which is what the
  * untyped `any` call sites already tolerate.
+ * Function entries receive RPC args and the server's build selections.
  */
-export function fixtureFor(method, extra = null) {
-  if (extra && Object.prototype.hasOwnProperty.call(extra, method)) return extra[method];
-  return Object.prototype.hasOwnProperty.call(RPC_FIXTURES, method)
+export function fixtureFor(method, extra = null, args = [], selections = {}) {
+  const reply = extra && Object.prototype.hasOwnProperty.call(extra, method)
+    ? extra[method]
+    : Object.prototype.hasOwnProperty.call(RPC_FIXTURES, method)
     ? RPC_FIXTURES[method]
     : null;
+  return typeof reply === "function" ? reply(args, selections) : reply;
 }

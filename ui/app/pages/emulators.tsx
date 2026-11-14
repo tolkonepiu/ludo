@@ -173,7 +173,7 @@ export function EmulatorBuildModal({ builds, selected, name, onPick, closeModal 
             <div style={{ fontSize: '14px', fontWeight: 700, lineHeight: 1.3 }}>{name}</div>
             <div style={{ fontSize: '11px', color: V2.fgMuted, marginTop: '3px', lineHeight: 1.4 }}>
               {/* The one question anybody actually has before switching. */}
-              Every build shares the same saves, firmware and settings.
+              Choose which installed build Ludo launches. Save and settings locations depend on the build.
             </div>
           </div>
           <div style={{ height: '1px', background: V2.border, margin: '0 4px 4px' }} />
