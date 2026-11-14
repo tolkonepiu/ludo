@@ -112,12 +112,51 @@ def main():
         check('Xenia direct xex', core.resolve_xbox360_rom(xex), (xex, xbox))
         iso = touch(home / 'Game.iso')
         check('Xenia direct iso', core.resolve_xbox360_rom(iso), (iso, home))
+        zars = [touch(home / name) for name in ('Game.zar', 'Upper.ZAR')]
+        for zar in zars:
+            check(f'direct {zar.name}', core.resolve_xbox360_rom(zar), (zar, home))
+        folder_targets = []
+        for suffix in ('.zar', '.ZAR', '.iso', '.xex'):
+            folder = home / ('Folder' + suffix)
+            target = touch(folder / ('Game' + suffix))
+            touch(folder / 'manual.pdf')
+            folder_targets.append((folder, target))
+            check(f'folder single {suffix} ignores manual', core.resolve_xbox360_rom(folder), (target, folder))
+        touch(xbox / 'other.zar')
+        touch(xbox / 'disc.iso')
+        check('default.xex preferred over other game files', core.resolve_xbox360_rom(xbox), (xex, xbox))
+        empty = home / 'Empty'
+        empty.mkdir()
+        ambiguous = home / 'Ambiguous'
+        touch(ambiguous / 'one.zar')
+        touch(ambiguous / 'two.iso')
+        for path, message in ((empty, 'one .iso/.xex/.zar'), (ambiguous, 'multiple .iso/.xex/.zar')):
+            try:
+                core.resolve_xbox360_rom(path)
+                check(f'{path.name} rejected', False, True)
+            except ValueError as error:
+                check(f'{path.name} actionable error', message in str(error), True)
+        for name in ('unsupported.elf', 'arbitrary.bin', 'extensionless'):
+            target = touch(home / name)
+            try:
+                core.resolve_xbox360_rom(target)
+                check(f'{name} rejected', False, True)
+            except ValueError as error:
+                check(f'{name} rejected with allowlist', '.iso/.xex/.zar' in str(error), True)
         for variant in ('canary', 'edge'):
             app = builds[f'xenia_{variant}_linux.AppImage']
             ra.settings = Settings(xenia_path=app)
             check(f'{variant} selection', core.find_standalone_executable('xenia', xs, ra.settings), app)
             check(f'{variant} launch without RA', ra.build_launch_command(xbox, 'Any name', platform_slug='xbox360'),
                   ([app, str(xex)], None))
+            for zar in zars:
+                check(f'{variant} direct {zar.name} argv',
+                      ra.build_launch_command(zar, 'Any name', platform_slug='xbox360'),
+                      ([app, str(zar)], None))
+            for folder, target in folder_targets:
+                check(f'{variant} folder {target.suffix} argv',
+                      ra.build_launch_command(folder, 'Any name', platform_slug='xbox360'),
+                      ([app, str(target)], None))
         steam = core.SteamShortcutManager.__new__(core.SteamShortcutManager)
         steam.retroarch, steam.log = ra, lambda message: None
         for slug, path in (('xbox360', touch(home / 'game.zip')), ('xbox360', home)):
@@ -152,7 +191,7 @@ def main():
         entry = steam.build_shortcut_entry('Unsupported', str(home / 'game.zip'), 'Xbox 360',
                                            'Collection', platform_slug='xbox360')
         check('unsupported shortcut shows actual boot error',
-              ('Xenia' in entry['LaunchOptions'], '.iso/.xex' in entry['LaunchOptions']), (True, True))
+              ('Xenia' in entry['LaunchOptions'], '.iso/.xex/.zar' in entry['LaunchOptions']), (True, True))
 
         members = ['default.xex', 'media/nested/data.bin']
         body = zipped(members)
@@ -173,6 +212,31 @@ def main():
         direct = home / 'Direct.iso'
         check('direct single file download', download(direct, 'xbox360', b'disc')[0], True)
         check('direct single file bytes', direct.read_bytes(), b'disc')
+        for name in ('Game.zar', 'Game.ZAR'):
+            direct_zar = home / ('Direct' + name)
+            check(f'direct {name} download', download(direct_zar, 'xbox360', b'ZAR synthetic payload')[0], True)
+            check(f'direct {name} unchanged', direct_zar.read_bytes(), b'ZAR synthetic payload')
+            for wrapper in ('', 'Outer/Inner/'):
+                for folder in (False, True):
+                    label = f'{name} wrapper={bool(wrapper)} folder={folder}'
+                    dest = home / f'Zar-{name}-{bool(wrapper)}-{folder}' / ('Folder' if folder else 'Archive.zip')
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    ok, why = download(dest, 'xbox360', zipped([wrapper + name, wrapper + 'manual.pdf']), folder)
+                    root = dest if folder else dest.with_suffix('')
+                    check(f'{label} download', (ok, why.startswith('Download successful')), (True, True))
+                    target, grant = core.resolve_xbox360_rom(root)
+                    check(f'{label} resolved target and grant', (target, grant), (root / name, root))
+                    check(f'{label} bytes unchanged', target.read_bytes(), b'game')
+                    check(f'{label} manual preserved', (root / 'manual.pdf').read_bytes(), b'game')
+                    check(f'{label} launch argv',
+                          ra.build_launch_command(root, 'Any name', platform_slug='xbox360'),
+                          ([builds['xenia_edge_linux.AppImage'], str(target)], None))
+        ambiguous_archive = home / 'AmbiguousDownload.zip'
+        ambiguous_archive.write_bytes(zipped(['one.zar', 'two.iso']))
+        ok, why = core._extract_xbox360_archive(ambiguous_archive)
+        check('ambiguous archive actionable error', (ok, 'multiple .iso/.xex/.zar' in why), (False, True))
+        check('ambiguous archive retained', ambiguous_archive.exists(), True)
+        check('ambiguous extraction not installed', ambiguous_archive.with_suffix('').exists(), False)
         for body in (b'broken zip', zipped(['readme.txt']), zipped(['../escape'])):
             bad = home / 'Bad.zip'
             bad.write_bytes(body)

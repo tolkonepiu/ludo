@@ -1357,18 +1357,27 @@ def resolve_wiiu_rom(rom_path):
     return path, path.parent
 
 
+_XBOX360_ROM_SUFFIXES = ('.iso', '.xex', '.zar')
+
+
 def resolve_xbox360_rom(rom_path):
-    """Boot an Xbox 360 image/executable, keeping a folder game's siblings."""
+    """Boot an allowed Xbox 360 file, keeping a folder game's siblings."""
     path = Path(rom_path)
     if path.is_dir():
-        target = next((f for f in sorted(path.iterdir())
-                       if f.is_file() and f.name.lower() == 'default.xex'), None)
+        files = sorted(f for f in path.iterdir() if f.is_file())
+        target = next((f for f in files if f.name.lower() == 'default.xex'), None)
         if target:
             return target, path
-        raise ValueError('Xenia needs a folder containing default.xex or a .iso/.xex file')
-    if path.suffix.lower() in ('.iso', '.xex'):
+        candidates = [f for f in files if f.suffix.lower() in _XBOX360_ROM_SUFFIXES]
+        if len(candidates) == 1:
+            return candidates[0], path
+        if len(candidates) > 1:
+            raise ValueError('Xenia folder contains multiple .iso/.xex/.zar files; '
+                             'choose one file directly or put each game in its own folder')
+        raise ValueError('Xenia needs a folder containing default.xex or one .iso/.xex/.zar file')
+    if path.suffix.lower() in _XBOX360_ROM_SUFFIXES:
         return path, path.parent
-    raise ValueError('Xenia supports .iso/.xex files or a folder containing default.xex')
+    raise ValueError('Xenia supports .iso/.xex/.zar files or a folder containing default.xex')
 
 
 def _standalone_appimage_dirs():

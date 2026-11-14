@@ -23,15 +23,18 @@ def make(path):
 
 @pytest.mark.parametrize('slug,name', [
     ('xbox360', 'game.iso'), ('xbox360', 'game.xex'),
+    ('xbox360', 'game.zar'), ('xbox360', 'game.ZAR'),
 ])
 def test_single_file_is_validated(backend, tmp_path, slug, name):
     target = make(tmp_path / name)
     assert backend._resolve_launch_path(target, platform_slug=slug) == str(target)
 
 
-def test_folder_bypasses_generic_disc_lister(backend, tmp_path, monkeypatch):
+@pytest.mark.parametrize('name', ['default.xex', 'game.iso', 'game.zar', 'game.ZAR'])
+def test_folder_bypasses_generic_disc_lister(backend, tmp_path, monkeypatch, name):
     folder = tmp_path / 'Game'
-    target = make(folder / 'default.xex')
+    target = make(folder / name)
+    make(folder / 'manual.pdf')
     make(folder / 'content' / 'a.bin')
     make(folder / 'playlist.m3u')
     monkeypatch.setattr(backend, '_list_local_discs', lambda _: pytest.fail('disc lister called'))
@@ -39,10 +42,10 @@ def test_folder_bypasses_generic_disc_lister(backend, tmp_path, monkeypatch):
     assert _detect_multi_disc(folder, True, 'xbox360') == (False, 0)
 
 
-@pytest.mark.parametrize('name', ['game.zip', 'game.pkg'])
+@pytest.mark.parametrize('name', ['game.zip', 'game.pkg', 'game.elf', 'arbitrary.bin', 'extensionless'])
 def test_unsupported_formats_have_actionable_error(backend, tmp_path, name):
     target = make(tmp_path / name)
-    with pytest.raises(ValueError, match='Xenia.*iso/.xex'):
+    with pytest.raises(ValueError, match=r'Xenia.*\.iso/\.xex/\.zar'):
         backend._resolve_launch_path(target, platform_slug='xbox360')
 
 
@@ -76,12 +79,13 @@ async def test_launch_rpc_surfaces_invalid_target_error(backend, monkeypatch, tm
     backend._retroarch = SimpleNamespace(_gamescope_running=lambda: True)
     result = await getattr(backend, method)(7)
     assert result['success'] is False
-    assert 'Xenia' in result['message'] and '.iso/.xex' in result['message']
+    assert 'Xenia' in result['message'] and '.iso/.xex/.zar' in result['message']
 
 
-def test_extracted_download_survives_list_and_reconcile(backend, tmp_path):
+@pytest.mark.parametrize('name', ['default.xex', 'game.zar', 'game.ZAR'])
+def test_extracted_download_survives_list_and_reconcile(backend, tmp_path, name):
     folder = tmp_path / 'xbox360' / 'Game'
-    make(folder / 'default.xex')
+    target = make(folder / name)
     make(folder / 'assets' / 'a.bin')
     make(folder / 'assets' / 'b.bin')
     assert _resolve_download_path(tmp_path, 'xbox360', 'Game.zip') == (folder, True)
@@ -89,6 +93,7 @@ def test_extracted_download_survives_list_and_reconcile(backend, tmp_path):
     entry = backend._game_entry(rom, tmp_path)
     assert entry['is_downloaded'] and entry['local_path'] == str(folder)
     assert not entry['is_multi_disc'] and entry['disc_count'] == 0
+    assert backend._resolve_launch_path(folder, platform_slug='xbox360') == str(target)
     backend._settings = SimpleNamespace(get=lambda *args: str(tmp_path))
     backend._reconcile_downloads([entry])
     assert entry['is_downloaded'] and entry['local_path'] == str(folder)
