@@ -31,12 +31,14 @@ export function CorePickerModal({ row, availableCores, canDownload, noDownloadRe
   // opening the picker stays a local, offline-safe operation.
   const [catalogue, setCatalogue] = useState<string[] | null>(null);
   const rdSet = new Set<string>(row?.retrodeck_choices || []);
+  const xbox = row?.slug === 'xbox360';
   // Installed cores that can actually run this platform (RetroDECK's choices
   // plus our own map). Only these are offered — pinning mupen64plus to Game Boy
   // Advance just produces a launch that fails. The rest of the core folder is
   // still reachable behind "show all" for cores we don't know about.
   const relevant: string[] = (row?.platform_cores
-    || (row?.retrodeck_choices || []).filter((c: string) => availableCores.includes(c)));
+    || (row?.retrodeck_choices || []).filter((c: string) => availableCores.includes(c)))
+    .filter((c: string) => !xbox || c === 'xenia_edge');
   const relevantSet = new Set<string>(relevant);
   const [showAll, setShowAll] = useState(false);
   useEffect(() => { const t = setTimeout(() => { if (panelRef.current) _forceGamepadFocus(panelRef.current); }, 60); return () => clearTimeout(t); }, []);
@@ -47,7 +49,7 @@ export function CorePickerModal({ row, availableCores, canDownload, noDownloadRe
   const rdOrdered = relevant.filter((c: string) => match(c));
   // Filtering searches the whole installed set even when collapsed, so you can
   // find any core by typing without toggling "show all" first.
-  const others = (showAll || q) ? availableCores.filter((c) => !relevantSet.has(c) && match(c)) : [];
+  const others = !xbox && (showAll || q) ? availableCores.filter((c) => !relevantSet.has(c) && match(c)) : [];
   const current = row?.override || '';
 
   const pick = (core: string) => { closeModal?.(); onPick(core); };
@@ -57,12 +59,12 @@ export function CorePickerModal({ row, availableCores, canDownload, noDownloadRe
   // in the catalogue. Both filtered against what's already installed.
   // Nothing downloadable on a RetroDECK install (it bundles its own cores in a
   // read-only tree) — the whole section, catalogue fetch included, stays off.
-  const suggested: string[] = canDownload ? (row?.download_candidates || []).filter(match) : [];
-  const catalogueHits = (canDownload && q && catalogue)
+  const suggested: string[] = canDownload ? (row?.download_candidates || []).filter((c: string) => (!xbox || c === 'xenia_edge') && match(c)) : [];
+  const catalogueHits = (!xbox && canDownload && q && catalogue)
     ? catalogue.filter((c) => !availableCores.includes(c) && !suggested.includes(c) && match(c)).slice(0, 40)
     : [];
   useEffect(() => {
-    if (!canDownload || !q || catalogue !== null) return;
+    if (xbox || !canDownload || !q || catalogue !== null) return;
     getDownloadableCores(false)
       .then((r: any) => setCatalogue(r?.success ? (r.cores || []).map((c: any) => c.name) : []))
       .catch(() => setCatalogue([]));
@@ -105,6 +107,7 @@ export function CorePickerModal({ row, availableCores, canDownload, noDownloadRe
             fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em',
             color: V2.fgMuted, padding: '6px 8px 10px',
           }}>Core · {row?.platform_name || ''}</div>
+          {xbox && <div style={{ padding: '0 8px 10px', fontSize: '11.5px', color: V2.fgMuted, lineHeight: 1.45 }}>Auto uses native Xenia when installed, otherwise Xenia Edge via RetroArch. The core keeps its own saves and does not support RetroArch save states or save sync.</div>}
           <div style={{ padding: '0 4px 8px' }}>
             <V2SearchField value={query} onChange={setQuery} />
           </div>
@@ -145,11 +148,11 @@ export function CorePickerModal({ row, availableCores, canDownload, noDownloadRe
           {/* Escape hatch to the rest of the core folder, for cores our map
               doesn't know about. Off by default so a core meant for another
               system can't be pinned here by accident. */}
-          <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
+          {!xbox && <><div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
           <UserMenuRow
             icon={<FaLayerGroup size={13} />}
             label={showAll ? 'Show only cores for this platform' : 'Show all installed cores'}
-            onSelect={() => setShowAll((v) => !v)} />
+            onSelect={() => setShowAll((v) => !v)} /></>}
           {others.length > 0 && (
             <>
               <div style={{ height: '1px', background: V2.border, margin: '4px 4px' }} />
@@ -268,7 +271,8 @@ export function CoresPage() {
       const r = await setCoreOverride(slug, core);
       if (r?.success && r.mapping) {
         setRows((prev) => prev.map((x) => x.slug === slug ? { ...r.mapping } : x));
-      }
+        await loadEmulatorStatus(true);
+      } else throw new Error('Could not save change');
     } catch { toaster.toast({ title: 'Core override', body: 'Could not save change' }); }
   };
 
@@ -304,7 +308,7 @@ export function CoresPage() {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <span style={{ fontSize: '13px', fontWeight: 600, color: row.resolved_core ? V2.fg : V2.danger }}>
-          {row.resolved_core || (row.standalone ? 'not found' : 'no core')}
+          {row.resolved_core || (row.standalone && row.slug !== 'xbox360' ? 'not found' : 'no core')}
         </span>
         <span style={{
           fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em',
@@ -345,6 +349,8 @@ export function CoresPage() {
             title={row.platform_name}
             subtitle={busy === row.slug
               ? 'Downloading core…'
+              : row.slug === 'xbox360' && row.standalone?.launch_core
+                ? (row.resolved_core ? 'Xenia Edge via RetroArch — A to change' : 'Xenia Edge core not installed — A to download or change')
               : row.standalone
                 ? (row.standalone.installed
                   ? `${row.standalone.name} runs this platform on its own — no core needed`
@@ -358,7 +364,7 @@ export function CoresPage() {
                 : row.source === 'override'
                   ? 'Pinned by you — A to change or reset to auto'
                   : 'Auto-resolved — A to pin a specific core'}
-            onClick={() => { if (!row.standalone) openPicker(row); }}
+            onClick={() => { if (!row.standalone || row.slug === 'xbox360') openPicker(row); }}
             right={badge(row)} />
         ))}
       </V2SettingsSection>

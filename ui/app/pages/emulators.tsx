@@ -8,7 +8,7 @@ import { V2_FOCUS_STYLE, v2Page } from "../focus";
 import { libBack, libNavigate } from "../nav";
 import { GameActionButton, MODAL_SCRIM_INSET, UserMenuRow, V2CardRow, V2SettingsSection } from "../kit";
 import { _forceGamepadFocus } from "../shell";
-import { useEmulatorStatus } from "../emulator";
+import { loadEmulatorStatus, useEmulatorStatus } from "../emulator";
 // Settings ▸ Emulators — every emulator Ludo drives, one row each in the same
 // shape: the name, where it lives, and a line about how it was found. A opens
 // that emulator's own page (RetroArch/RetroDECK: its cores) or its build choice
@@ -49,7 +49,9 @@ export function EmulatorsPage() {
         onPick={async (path: string) => {
           setBuilds((all) => ({ ...all, [key]: { ...set, selected: path } }));
           try {
-            await setEmulatorBuild(key, path);
+            const r = await setEmulatorBuild(key, path);
+            if (r?.success === false) throw new Error(r.message || 'Could not save change');
+            await loadEmulatorStatus(true);
             toaster.toast({ title: set.name, body: path ? 'Build selected' : 'Back to auto-detect' });
           } catch { loadBuilds(); }
         }} />
@@ -85,7 +87,9 @@ export function EmulatorsPage() {
       const inUse = chosen?.path || set?.list.find((b) => b.current)?.path || e.executable;
       rows.push(
         <V2CardRow key={e.key} icon={<FaGamepad size={15} />} title={e.name}
-          subtitle={e.installed ? (
+          subtitle={e.launch_core ? (
+            <span>Xenia Edge via RetroArch{e.installed && <> · Native preference inactive: {showPath(inUse || 'detected')}</>}</span>
+          ) : e.installed ? (
             <span style={{ wordBreak: 'break-all' }}>
               {showPath(inUse || 'detected')}
               <span style={{ color: V2.fgFaint }}>

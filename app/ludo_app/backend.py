@@ -4657,6 +4657,21 @@ class LudoBackend:
         while flatpak reports nothing parseable — show it as indeterminate."""
         return {'success': True, **self._emu_install}
 
+    def _core_mapping(self, label, slug):
+        """The same complete row for both the mapping list and a changed pin."""
+        ra = self._retroarch
+        info = ra.describe_core_resolution(label, system_slug=slug)
+        info.update({'slug': slug, 'platform_name': label})
+        standalone = ra.standalone_emulator_status(label, slug)
+        if standalone:
+            info['standalone'] = standalone
+            if not standalone.get('launch_core'):
+                info['resolved_core'] = standalone['name'] if standalone['installed'] else ''
+                info['source'] = 'standalone' if standalone['installed'] else 'none'
+            elif not info.get('resolved_core'):
+                info['resolved_core'] = ''
+        return info
+
     async def get_core_mappings(self):
         """For the core-mapping settings page: one row per platform in the
         user's library, showing how the launch core resolves and the options
@@ -4685,17 +4700,7 @@ class LudoBackend:
                     continue
                 seen.add(slug)
                 label = self._platform_name_for(g)
-                info = ra.describe_core_resolution(label, system_slug=slug)
-                info.update({'slug': slug, 'platform_name': label})
-                # A platform served by a standalone emulator (Switch -> Eden)
-                # has no libretro core by design; reporting "no core" for it
-                # made a working Eden look undetected (rommapp/ludo#39).
-                standalone = ra.standalone_emulator_status(label, slug)
-                if standalone:
-                    info['standalone'] = standalone
-                    info['resolved_core'] = standalone['name'] if standalone['installed'] else ''
-                    info['source'] = 'standalone' if standalone['installed'] else 'none'
-                rows.append(info)
+                rows.append(self._core_mapping(label, slug))
             rows.sort(key=lambda r: (r['platform_name'] or '').lower())
             support = ra.core_download_support()
             return {'success': True, 'available_cores': available, 'mappings': rows,
@@ -4755,6 +4760,8 @@ class LudoBackend:
         """Pin (core non-empty) or clear (core empty) the launch core for a
         platform slug. Returns the refreshed resolution for that row."""
         try:
+            if slug in XBOX360_SLUGS and core not in ('', 'xenia_edge'):
+                return {'success': False, 'message': 'Xbox 360 supports only the xenia_edge core'}
             ra = self._retroarch
             if not ra:
                 return {'success': False, 'message': 'RetroArch interface unavailable'}
@@ -4765,8 +4772,7 @@ class LudoBackend:
                 if (g.get('platform_slug') or (g.get('romm_data') or {}).get('platform_slug')) == slug:
                     label = self._platform_name_for(g)
                     break
-            info = ra.describe_core_resolution(label, system_slug=slug)
-            info.update({'slug': slug, 'platform_name': label})
+            info = self._core_mapping(label, slug)
             return {'success': True, 'mapping': info}
         except Exception as e:
             logging.error(f"set_core_override error: {e}", exc_info=True)
@@ -7369,7 +7375,14 @@ class LudoBackend:
         slug = str(platform_slug or '').lower()
         # Xbox 360 folder titles are executable trees, not disc sets.
         if slug in XBOX360_SLUGS:
-            target, _root = resolve_xbox360_rom(p)
+            libretro = False
+            if self._retroarch:
+                try:
+                    status = self._retroarch.standalone_emulator_status('Xbox 360', slug)
+                    libretro = bool(status.get('launch_core'))
+                except (AttributeError, TypeError):
+                    pass  # An interface not initialized yet defaults to native.
+            target, _root = resolve_xbox360_rom(p, libretro=libretro)
             return str(target) if target.is_file() else None
         if p.is_file():
             return str(p)
@@ -8444,6 +8457,10 @@ class LudoBackend:
             if not self._settings:
                 return {'success': False, 'message': 'Settings unavailable'}
             self._settings.set('Emulators', f'{key}_path', str(path or ''))
+            if key == 'xenia':
+                self._settings.set('CoreOverrides', 'xbox360', '')
+                if self._retroarch and self._retroarch.retroarch_executable:
+                    await asyncio.to_thread(self._retroarch.refresh_installation)
             logging.info(f"{key} build set to {path or 'automatic'}")
             return {'success': True}
         except Exception as e:
@@ -10334,6 +10351,8 @@ class LudoBackend:
         Raises SaveConflictPending when this game's save changed here and on
         the server: the launch stops so the user can choose first.
         """
+        if self._platform_slug_for(game).lower() in XBOX360_SLUGS:
+            return None  # Xenia owns its content storage; no RA saves/states.
         auto = self._auto_sync
         if auto is None and self._romm_client is not None:
             for _ in range(20):
@@ -10428,6 +10447,8 @@ class LudoBackend:
         launch, and a game that won't start at all is far worse than a game
         that starts at the title screen.
         """
+        if self._platform_slug_for(game).lower() in XBOX360_SLUGS:
+            return None
         auto = self._auto_sync
         if auto is None:
             return None
@@ -10651,7 +10672,8 @@ class LudoBackend:
             # missing, so the picker (and the core downloader behind it) is the
             # wrong answer for them: it would offer downloads that cannot help.
             # A missing standalone emulator surfaces as a plain launch error.
-            if ra.standalone_emulator_status(platform_name, slug):
+            standalone = ra.standalone_emulator_status(platform_name, slug)
+            if standalone and not standalone.get('launch_core'):
                 return {}
             info = ra.describe_core_resolution(platform_name, system_slug=slug)
             if info.get('resolved_core'):
@@ -11002,6 +11024,8 @@ class LudoBackend:
         and refusing to start a game the user might be able to play is the worse
         failure.
         """
+        if self._platform_slug_for(game).lower() in XBOX360_SLUGS:
+            return {}
         try:
             ra = self._retroarch
             if not ra or not platform_name:

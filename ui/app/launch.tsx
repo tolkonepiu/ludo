@@ -148,8 +148,11 @@ function MissingCoreModal({ gap, onPlay, closeModal }:
       // Pin it for this platform when it isn't the one we'd have guessed:
       // otherwise resolution could pick a different installed core next time and
       // the user's choice here would look ignored.
-      if (core !== recommended && gap.platform_slug) {
-        try { await setCoreOverride(gap.platform_slug, core); } catch { /* non-fatal */ }
+      if ((core !== recommended || (gap.platform_slug === 'xbox360' && core === 'xenia_edge')) && gap.platform_slug) {
+        try {
+          const selection = await setCoreOverride(gap.platform_slug, core);
+          if (gap.platform_slug === 'xbox360' && !selection?.success) throw new Error(selection?.message || 'Could not select the installed core');
+        } catch (e) { if (gap.platform_slug === 'xbox360') throw e; }
       }
       setDone(core);
       // The cores page and the emulator status both cache a core count.
@@ -464,6 +467,6 @@ export function cannotLaunch(status: EmuStatus | null,
                       platform?: string | null, slug?: string | null): boolean {
   if (status == null) return false;
   const alt = standaloneFor(status, platform, slug);
-  if (alt) return !alt.installed;   // its platform never uses a core
+  if (alt && !alt.launch_core) return !alt.installed;
   return !status.installed;
 }

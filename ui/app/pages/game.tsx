@@ -2058,7 +2058,7 @@ export function GameDetailPage() {
                     : <FaPlay size={14} style={{ marginLeft: '2px' }} />} />
                 {noEmulator && ctaFocused && (
                   <span style={{ fontSize: '12px', color: V2.warning, maxWidth: '260px', lineHeight: 1.35 }}>
-                    {gameStandalone
+                    {gameStandalone && !gameStandalone.launch_core
                       ? `${gameStandalone.name} is not installed — ${game?.platform || 'this platform'} needs it to play.`
                       : 'No emulator installed — install RetroArch from Home to play.'}
                   </span>

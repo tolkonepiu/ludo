@@ -169,6 +169,7 @@ export const POPULATED_FIXTURES = {
   set_emulator_build: ([key, path], selections) => {
     if (!Object.hasOwn(EMULATOR_BUILDS, key)) return { success: false, message: "Unknown emulator" };
     selections[key] = path || "";
+    if (key === "xenia") selections.xeniaCore = "";
     return { success: true };
   },
   get_core_mappings: {
@@ -233,6 +234,33 @@ export const POPULATED_FIXTURES = {
     has_cover: false,
   },
 };
+
+// Provider choices are server state, not an optimistic change in the page.
+export function xeniaFixtures({ native = true, core = true, pinned = false } = {}) {
+  const descriptor = (state) => ({
+    ...POPULATED_FIXTURES.get_emulator_status.standalone.find((e) => e.key === "xenia"),
+    installed: native, executable: native ? (state.xenia || EMULATOR_BUILDS.xenia.builds[0].path) : "",
+    launch_core: (state.xeniaCore ?? (pinned ? "xenia_edge" : "")) || !native ? "xenia_edge" : "",
+  });
+  const row = (state) => {
+    const standalone = descriptor(state);
+    const override = state.xeniaCore ?? (pinned ? "xenia_edge" : "");
+    const installed = state.xeniaInstalled ?? core;
+    return { slug: "xbox360", platform_name: "Xbox 360", standalone, override,
+      resolved_core: standalone.launch_core ? (installed ? "xenia_edge" : "") : "Xenia",
+      source: standalone.launch_core ? (installed ? (override ? "override" : "guess") : "none") : "standalone",
+      platform_cores: installed ? ["xenia_edge"] : [], download_candidates: installed ? [] : ["xenia_edge"],
+      retrodeck_choices: [], retrodeck_default: null };
+  };
+  return { ...POPULATED_FIXTURES,
+    get_emulator_status: (_args, state) => ({ ...POPULATED_FIXTURES.get_emulator_status,
+      standalone: POPULATED_FIXTURES.get_emulator_status.standalone.map((e) => e.key === "xenia" ? descriptor(state) : e) }),
+    get_core_mappings: (_args, state) => ({ success: true, mappings: [row(state)],
+      available_cores: (state.xeniaInstalled ?? core) ? ["xenia_edge", "snes9x"] : ["snes9x"], can_download_cores: true }),
+    set_core_override: ([slug, value], state) => { state.xeniaCore = value; return { success: true, mapping: row(state) }; },
+    download_core: ([_core], state) => { state.xeniaInstalled = true; return { success: true }; },
+  };
+}
 
 /**
  * The reply the fake server sends for `method`.

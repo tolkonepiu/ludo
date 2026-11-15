@@ -52,6 +52,7 @@ export type EmuStatus = {
 
 export type EmuStandalone = {
   key: string; name: string; installed: boolean; executable: string;
+  launch_core?: '' | 'xenia_edge';
   // Lowercase platform tokens; Xenia uses only RomM's canonical slug.
   platforms: string[];
 };

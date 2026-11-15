@@ -1360,24 +1360,28 @@ def resolve_wiiu_rom(rom_path):
 _XBOX360_ROM_SUFFIXES = ('.iso', '.xex', '.zar')
 
 
-def resolve_xbox360_rom(rom_path):
+def resolve_xbox360_rom(rom_path, *, libretro=False):
     """Boot an allowed Xbox 360 file, keeping a folder game's siblings."""
     path = Path(rom_path)
+    suffixes = _XBOX360_ROM_SUFFIXES + (('.m3u', '.xcp') if libretro else ())
     if path.is_dir():
         files = sorted(f for f in path.iterdir() if f.is_file())
         target = next((f for f in files if f.name.lower() == 'default.xex'), None)
         if target:
             return target, path
-        candidates = [f for f in files if f.suffix.lower() in _XBOX360_ROM_SUFFIXES]
+        playlists = [f for f in files if f.suffix.lower() == '.m3u'] if libretro else []
+        if len(playlists) == 1:
+            return playlists[0], path
+        candidates = [f for f in files if f.suffix.lower() in suffixes]
         if len(candidates) == 1:
             return candidates[0], path
         if len(candidates) > 1:
-            raise ValueError('Xenia folder contains multiple .iso/.xex/.zar files; '
+            raise ValueError(f'Xenia folder contains multiple {"/".join(suffixes)} files; '
                              'choose one file directly or put each game in its own folder')
-        raise ValueError('Xenia needs a folder containing default.xex or one .iso/.xex/.zar file')
-    if path.suffix.lower() in _XBOX360_ROM_SUFFIXES:
+        raise ValueError(f'Xenia needs a folder containing default.xex or one {"/".join(suffixes)} file')
+    if path.suffix.lower() in suffixes:
         return path, path.parent
-    raise ValueError('Xenia supports .iso/.xex/.zar files or a folder containing default.xex')
+    raise ValueError(f'Xenia supports {"/".join(suffixes)} files or a folder containing default.xex')
 
 
 def _standalone_appimage_dirs():
@@ -2593,7 +2597,7 @@ def _extract_xbox360_archive(archive_path, on_progress=None, dest=None):
             root = stage
             while True:
                 try:
-                    resolve_xbox360_rom(root)
+                    resolve_xbox360_rom(root, libretro=True)
                     break
                 except ValueError:
                     children = list(root.iterdir())
@@ -7196,6 +7200,7 @@ class RetroArchInterface:
 
         # Platform to core mapping
         self.platform_core_map = {
+            'xbox360': ['xenia_edge'],
             'Super Nintendo Entertainment System': ['snes9x', 'bsnes', 'mesen-s'],
             'PlayStation': ['pcsx_rearmed', 'swanstation', 'beetle_psx', 'beetle_psx_hw'],
             'Nintendo Entertainment System': ['nestopia', 'fceumm', 'mesen'],
@@ -8734,9 +8739,25 @@ class RetroArchInterface:
     def describe_core_resolution(self, platform_name, system_slug=None):
         """Return how the core resolves for a system, for the settings UI:
         {resolved_core, source, override, retrodeck_default, retrodeck_choices}.
-        source ∈ {'override','retrodeck','guess','none'}."""
+        source ∈ {'override','retrodeck','guess','standalone','none'}."""
         available_cores = self.get_available_cores()
         override = self.get_core_override(system_slug)
+        standalone = self.standalone_emulator_status(platform_name, system_slug)
+        if standalone and standalone['key'] == 'xenia':
+            native = not standalone['launch_core']
+            installed = 'xenia_edge' in available_cores
+            resolved, source = None, 'none'
+            if native:
+                resolved, source = 'Xenia', 'standalone'
+            elif installed:
+                resolved = 'xenia_edge'
+                source = 'override' if override == 'xenia_edge' else 'guess'
+            return {
+                'resolved_core': resolved, 'source': source,
+                'override': override, 'retrodeck_default': None, 'retrodeck_choices': [],
+                'platform_cores': ['xenia_edge'] if installed else [],
+                'download_candidates': self.downloadable_cores_for_platform(platform_name, system_slug),
+            }
         rd_choices = self._retrodeck_core_map().get(system_slug, []) if system_slug else []
         rd_default = self._retrodeck_core_for_slug(system_slug, available_cores) if system_slug else None
         if override and override in available_cores:
@@ -8786,6 +8807,9 @@ class RetroArchInterface:
         not: the exact platform_core_map entries plus keyword matches for the
         many labels that don't match a key exactly ("Sega Mega Drive/Genesis").
         Names as our map spells them — alias to the buildbot's separately."""
+        match = standalone_emulator_for_platform(platform_name, system_slug)
+        if match and match[0] == 'xenia':
+            return ['xenia_edge']
         wanted = []
         for key in (system_slug, platform_name):
             for c in (self.platform_core_map.get(key) or []):
@@ -8950,16 +8974,18 @@ class RetroArchInterface:
     def standalone_emulator_status(self, platform_name, platform_slug=None):
         """What we know about the standalone emulator for a platform, or {}.
 
-        {key, name, executable, installed} — empty when the platform is served
-        by libretro cores like everything else.
+        {key, name, executable, installed, launch_core}. Native availability is
+        independent of launch_core, which names Xenia's selected core route.
         """
         match = standalone_emulator_for_platform(platform_name, platform_slug)
         if not match:
             return {}
         key, spec = match
         exe = find_standalone_executable(key, spec, self.settings)
+        launch_core = ('xenia_edge' if key == 'xenia' and
+                       (self.get_core_override('xbox360') == 'xenia_edge' or not exe) else '')
         return {'key': key, 'name': spec['name'], 'executable': exe,
-                'installed': bool(exe)}
+                'installed': bool(exe), 'launch_core': launch_core}
 
     def standalone_emulators_status(self):
         """Every standalone emulator Ludo knows about, and whether it's here.
@@ -8971,12 +8997,11 @@ class RetroArchInterface:
         out = []
         for key, spec in STANDALONE_EMULATORS.items():
             try:
-                exe = find_standalone_executable(key, spec, self.settings)
+                status = self.standalone_emulator_status(None, spec['platforms'][0])
             except Exception:
-                exe = ''
-            out.append({'key': key, 'name': spec['name'],
-                        'installed': bool(exe), 'executable': exe,
-                        'platforms': list(spec['platforms'])})
+                status = {'key': key, 'name': spec['name'], 'installed': False,
+                          'executable': '', 'launch_core': 'xenia_edge' if key == 'xenia' else ''}
+            out.append({**status, 'platforms': list(spec['platforms'])})
         return out
 
     def build_standalone_launch_command(self, rom_path, key, spec, executable):
@@ -9015,7 +9040,15 @@ class RetroArchInterface:
         # has only Eden installed, and every RetroArch-shaped step below (core
         # resolution, the config overlay, --entryslot) is meaningless for it.
         standalone = self.standalone_emulator_status(platform_name, platform_slug)
-        if standalone:
+        xenia_core = core_name == 'xenia_edge' or bool(standalone and standalone.get('launch_core'))
+        if xenia_core:
+            core_name = 'xenia_edge'
+            entry_slot = None
+            try:
+                rom_path, _root = resolve_xbox360_rom(rom_path, libretro=True)
+            except (ValueError, OSError) as e:
+                return None, str(e)
+        if standalone and not xenia_core:
             if not standalone['installed']:
                 return None, (f"{standalone['name']} is not installed — "
                               f"{platform_name} needs it, no core can run it")
@@ -9028,7 +9061,8 @@ class RetroArchInterface:
                 return None, str(e)
 
         if not self.retroarch_executable:
-            return None, "RetroArch executable not found"
+            return None, ("RetroArch executable not found (required for xenia_edge)"
+                          if xenia_core else "RetroArch executable not found")
 
         is_retrodeck = 'retrodeck' in self.retroarch_executable.lower()
 
@@ -9090,8 +9124,11 @@ class RetroArchInterface:
         # RetroArch has run once — so the FIRST session after an install always
         # went without them. --appendconfig layers a small file over the
         # config for this run, which needs no config to already exist.
-        overlay = self._launch_overlay_config(
-            None if 'retrodeck' in self.retroarch_executable.lower() else core_path)
+        overlay_core = None if 'retrodeck' in self.retroarch_executable.lower() else core_path
+        overlay = (self._launch_overlay_config(overlay_core, vulkan=True) if xenia_core
+                   else self._launch_overlay_config(overlay_core))
+        if xenia_core and not overlay:
+            return None, 'Could not create the Vulkan launch overlay for xenia_edge'
         if overlay:
             cmd.extend(['--appendconfig', overlay])
 
@@ -9099,7 +9136,8 @@ class RetroArchInterface:
         # save be matched to its game when the core names the file something
         # the ROM name can never match; see ensure_content_save_sorting.
         try:
-            self.ensure_content_save_sorting()
+            if not xenia_core:
+                self.ensure_content_save_sorting()
         except Exception as e:
             print(f"⚠️  Could not set save sorting: {e}")
 
@@ -9502,7 +9540,7 @@ class RetroArchInterface:
             return ''
         return self.MENU_TOGGLE_L3_R3
 
-    def _launch_overlay_config(self, core_path=None):
+    def _launch_overlay_config(self, core_path=None, *, vulkan=False):
         """Write the per-launch config overlay and return its path, or ''.
 
         `core_path` is the host path of the core being launched. When it lies
@@ -9529,6 +9567,8 @@ class RetroArchInterface:
                      'network_cmd_enable = "true"',
                      f'network_cmd_port = "{self.port}"']
             core_dir = self._core_dir_override(core_path)
+            if vulkan:
+                lines.append('video_driver = "vulkan"')
             if core_dir:
                 lines.append(f'libretro_directory = "{core_dir}"')
             combo = self._menu_toggle_combo()
@@ -9591,6 +9631,8 @@ class RetroArchInterface:
                                              platform_slug=platform_slug)
         if err:
             return False, err
+        if '-L' in cmd:
+            standalone = None
         # Recover the resolved core name for the success message below.
         core_name = core_name or (cmd[cmd.index('-L') + 1] if '-L' in cmd else None)
 

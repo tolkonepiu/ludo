@@ -490,7 +490,7 @@ export const GameTile = memo(function GameTile({ game, onOpen, onActiveCover, fo
       const alt = standaloneFor(_emuStatus, game.platform, game.platform_slug);
       toaster.toast({
         title: 'No emulator',
-        body: alt ? `${alt.name} is not installed — ${game.platform || 'this platform'} needs it.`
+        body: alt && !alt.launch_core ? `${alt.name} is not installed — ${game.platform || 'this platform'} needs it.`
                   : 'Install RetroArch from Home to play this.',
       });
       return;
